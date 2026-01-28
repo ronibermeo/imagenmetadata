@@ -1,21 +1,30 @@
-import os, time, subprocess, sys, shutil
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+import os
+import time
+import subprocess
+import sys
+import shutil
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
 EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp", ".heic"}
 
-def strip_metadata_exiftool(p: Path):
-    cmd, cwd, env = build_exiftool_command()
-    if not cmd:
-        raise FileNotFoundError("No se encontró ExifTool")
-    # Silencia salida normal; deja stderr para errores.
-    subprocess.run([*cmd, "-all=", "-overwrite_original", str(p)],
-                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
-                   cwd=str(cwd) if cwd else None, env=env)
-
 def get_app_dir() -> Path:
     return Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+
+def get_app_resources() -> Path:
+    # PyInstaller: _MEIPASS; py2app: ../Resources relative to executable
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            return Path(meipass)
+        exec_dir = Path(sys.executable).resolve().parent
+        resources = exec_dir.parent / "Resources"
+        if resources.exists():
+            return resources
+    return get_app_dir()
 
 def unique_dest(dir_path: Path, filename: str) -> Path:
     dest = dir_path / filename
@@ -31,45 +40,48 @@ def unique_dest(dir_path: Path, filename: str) -> Path:
         i += 1
 
 def find_exiftool_home() -> Path | None:
-    """
-    Devuelve la carpeta que contiene `exiftool_files/` si existe (en MEIPASS o junto al ejecutable/script).
-    """
+    """ Busca exiftool incluido en Resources (dentro del .app) o en rutas mac comunes,
+    o en PATH. """
     candidates: list[Path] = []
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        candidates.append(Path(getattr(sys, "_MEIPASS")))
-    candidates.append(get_app_dir())
+
+    resources = get_app_resources()
+    candidates.append(resources)
+
+    # Rutas comunes de Homebrew (Apple Silicon / Intel)
+    candidates.append(Path("/opt/homebrew/bin"))
+    candidates.append(Path("/usr/local/bin"))
     candidates.append(Path.cwd())
+    candidates.append(get_app_dir())
 
     for base in candidates:
-        if (base / "exiftool_files").is_dir():
-            return base
+        for name in ("exiftool", "exiftool.exe"):
+            p = base / name
+            if p.exists() and os.access(p, os.X_OK):
+                return base
+
+    # fallback: exiftool en PATH
+    p = shutil.which("exiftool") or shutil.which("exiftool.exe")
+    if p:
+        return Path(p).parent
+
     return None
 
 def build_exiftool_command() -> tuple[list[str] | None, Path | None, dict[str, str] | None]:
-    """
-    Construye el comando más robusto posible.
-
-    Preferimos ejecutar: perl.exe -I <exiftool_files/lib> <exiftool_files/exiftool.pl>
-    porque el launcher exiftool.exe puede fallar si el runtime Perl no queda bien resuelto.
-    """
     home = find_exiftool_home()
     if home:
-        exif_dir = home / "exiftool_files"
-        perl = exif_dir / "perl.exe"
-        script = exif_dir / "exiftool.pl"
-        lib_dir = exif_dir / "lib"
-        if perl.exists() and script.exists() and lib_dir.is_dir():
-            # Asegura que Perl encuentre los módulos (strict.pm, etc) desde el arranque.
-            env = os.environ.copy()
-            env["PERL5LIB"] = str(lib_dir)
-            return ([str(perl), "-I", str(lib_dir), str(script)], exif_dir, env)
-
-    # Fallback: si el usuario instaló exiftool en PATH
-    p = shutil.which("exiftool") or shutil.which("exiftool.exe")
-    if p:
-        return ([p], Path(p).parent, None)
-
+        for name in ("exiftool", "exiftool.exe"):
+            exe = home / name
+            if exe.exists() and os.access(exe, os.X_OK):
+                return ([str(exe)], home, None)
     return (None, None, None)
+
+def strip_metadata_exiftool(p: Path):
+    cmd, cwd, env = build_exiftool_command()
+    if not cmd:
+        raise FileNotFoundError("No se encontró ExifTool")
+    subprocess.run([*cmd, "-all=", "-overwrite_original", str(p)],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+                   cwd=str(cwd) if cwd else None, env=env)
 
 def set_file_times(p: Path, epoch: float):
     os.utime(p, (epoch, epoch))
@@ -91,9 +103,9 @@ class App:
 
         self.selected = []
 
-        tk.Button(root, text="Seleccionar imágenes", width=25, command=self.pick_images).pack(pady=6)
-        tk.Button(root, text="Seleccionar carpeta", width=25, command=self.pick_folder).pack(pady=6)
-        tk.Button(root, text="Limpiar metadatos", width=25, command=self.clean).pack(pady=10)
+        tk.Button(root, text="Seleccionar imágenes", width=30, command=self.pick_images).pack(pady=6)
+        tk.Button(root, text="Seleccionar carpeta", width=30, command=self.pick_folder).pack(pady=6)
+        tk.Button(root, text="Limpiar metadatos", width=30, command=self.clean).pack(pady=10)
 
         self.label = tk.Label(root, text="0 elementos seleccionados")
         self.label.pack(pady=6)
@@ -118,8 +130,8 @@ class App:
             messagebox.showerror(
                 "Falta ExifTool",
                 "No se encontró ExifTool.\n\n"
-                "Si usas el ejecutable 'final', esto NO debería pasar.\n"
-                "Vuelve a descargar el .exe que incluye ExifTool o contacta a quien te lo pasó.",
+                "La aplicación debería incluirlo, pero no fue posible localizarlo.\n"
+                "Si estás desarrollando, instala exiftool (brew install exiftool) o incluye el binario en Resources.",
             )
             return
         try:
@@ -128,7 +140,6 @@ class App:
             out_dir.mkdir(parents=True, exist_ok=True)
             count = 0
             for img in iter_images(self.selected):
-                # Copia a la carpeta junto al .exe (no toca el original)
                 dest = unique_dest(out_dir, img.name)
                 shutil.copy2(img, dest)
                 strip_metadata_exiftool(dest)
@@ -141,6 +152,10 @@ class App:
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
-root = tk.Tk()
-App(root)
-root.mainloop()
+def main():
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
